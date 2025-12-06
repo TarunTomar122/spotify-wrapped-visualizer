@@ -2,8 +2,6 @@
 
 A 3D interactive visualization of my top 100 songs on Spotify in 2025. Built with Three.js and WebGL shaders.
 
-![Preview](https://spotify-visualiser-three.vercel.app)
-
 ## Features
 
 - 🎵 **Interactive 3D gallery** — Navigate through floating album covers
