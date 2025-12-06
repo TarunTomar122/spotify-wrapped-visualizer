@@ -25,3 +25,6 @@ dist-ssr
 
 
 .env
+.vercel
+fetch-spotify-data.js
+spotify-2025-data.json

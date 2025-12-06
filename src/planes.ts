@@ -3,11 +3,12 @@ import vertexShader from "./shaders/vertex.glsl"
 import fragmentShader from "./shaders/fragment.glsl"
 import { Size } from "./types/types"
 import normalizeWheel from "normalize-wheel"
-import { get30NewReleaseCovers } from "./spotify"
+import { SpotifyPlayer } from "./spotifyPlayer"
 
 interface Props {
   scene: THREE.Scene
   sizes: Size
+  camera: THREE.Camera
 }
 
 interface ImageInfo {
@@ -27,8 +28,13 @@ export default class Planes {
   geometry: THREE.PlaneGeometry
   material: THREE.ShaderMaterial
   mesh: THREE.InstancedMesh
-  meshCount: number = 400
+  meshCount: number = 500
   sizes: Size
+  camera: THREE.Camera
+  raycaster: THREE.Raycaster
+  mouse: THREE.Vector2
+  spotifyPlayer: SpotifyPlayer
+  activeAlbumIndex: number = -1
   drag: {
     xCurrent: number
     xTarget: number
@@ -70,14 +76,19 @@ export default class Planes {
   atlasTexture: THREE.Texture | null = null
   blurryAtlasTexture: THREE.Texture | null = null
 
-  constructor({ scene, sizes }: Props) {
+  constructor({ scene, sizes, camera }: Props) {
     this.scene = scene
     this.sizes = sizes
+    this.camera = camera
 
     this.shaderParameters = {
       maxX: this.sizes.width * 2,
       maxY: this.sizes.height * 2,
     }
+
+    this.raycaster = new THREE.Raycaster()
+    this.mouse = new THREE.Vector2()
+    this.spotifyPlayer = new SpotifyPlayer()
 
     this.createGeometry()
     this.createMaterial()
@@ -85,6 +96,7 @@ export default class Planes {
     this.fetchCovers()
 
     window.addEventListener("wheel", this.onWheel.bind(this))
+    this.setupSpotifyPlayerUI()
   }
 
   createGeometry() {
@@ -93,13 +105,19 @@ export default class Planes {
   }
 
   async fetchCovers() {
-    //const urls: string[] = await get30NewReleaseCovers()
-    const urls: string[] = new Array(30)
+    // Using your Spotify 2025 top 100 songs!
+    const urls: string[] = new Array(100)
       .fill(0)
-      .map((_, i) => `/covers/image_${i}.jpg`)
+      .map((_, i) => `/my-covers/cover_${i}.jpg`)
     await this.loadTextureAtlas(urls)
     this.createBlurryAtlas()
     this.fillMeshData()
+    
+    // Hide loader
+    const loader = document.getElementById('loader')
+    if (loader) {
+      loader.classList.add('hidden')
+    }
   }
 
   async loadTextureAtlas(urls: string[]) {
@@ -225,6 +243,8 @@ export default class Planes {
         // Calculate total length of the gallery
         uSpeedY: { value: 0 },
         uDrag: { value: new THREE.Vector2(0, 0) },
+        uActiveAlbum: { value: -1 },
+        uGlowIntensity: { value: 0.5 },
       },
     })
   }
@@ -278,6 +298,149 @@ export default class Planes {
     )
   }
 
+  setupSpotifyPlayerUI() {
+    const playPauseBtn = document.getElementById("play-pause-btn")
+    const playIcon = document.getElementById("play-icon")
+    const pauseIcon = document.getElementById("pause-icon")
+
+    if (playPauseBtn) {
+      playPauseBtn.addEventListener("click", () => {
+        this.spotifyPlayer.togglePlayPause()
+        const isPlaying = this.spotifyPlayer.getIsPlaying()
+        
+        if (playIcon && pauseIcon) {
+          playIcon.style.display = isPlaying ? "none" : "block"
+          pauseIcon.style.display = isPlaying ? "block" : "none"
+        }
+      })
+    }
+
+    this.spotifyPlayer.onTrackChange((track) => {
+      const bottomPlayer = document.getElementById("bottom-player")
+      const albumArt = document.getElementById("player-album-art") as HTMLImageElement
+      const trackName = document.getElementById("player-track-name")
+      const artistName = document.getElementById("player-artist-name")
+
+      if (track && bottomPlayer) {
+        bottomPlayer.classList.remove("hidden")
+        
+        if (albumArt) albumArt.src = track.albumImage640
+        if (trackName) trackName.textContent = track.trackName
+        if (artistName) artistName.textContent = track.artists.map(a => a.name).join(", ")
+
+        if (playIcon && pauseIcon) {
+          playIcon.style.display = "none"
+          pauseIcon.style.display = "block"
+        }
+      }
+    })
+  }
+
+  onClick(event: MouseEvent) {
+    // Calculate mouse position in normalized device coordinates (-1 to +1)
+    this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1
+    this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1
+
+    // Update the raycaster
+    this.raycaster.setFromCamera(this.mouse, this.camera)
+
+    // We need to manually check intersections because positions are computed in the shader
+    // Get the initial positions attribute
+    const initialPositions = this.geometry.getAttribute('aInitialPosition') as THREE.BufferAttribute
+    const meshSpeeds = this.geometry.getAttribute('aMeshSpeed') as THREE.BufferAttribute
+    
+    if (!initialPositions || !meshSpeeds) {
+      return
+    }
+
+    const time = this.material.uniforms.uTime.value
+    const maxX = this.shaderParameters.maxX
+    const maxY = this.shaderParameters.maxY
+    const dragX = this.drag.xCurrent
+    const dragY = this.drag.yCurrent
+    const scrollY = this.scrollY.current
+    
+    const maxZ = 12
+    const minZ = -30
+    
+    // Plane dimensions (from createGeometry: 1 * 2 = 2 width, 1.69 * 2 = 3.38 height)
+    const planeHalfWidth = 1
+    const planeHalfHeight = 1.69
+
+    let closestInstance = -1
+    let closestDistance = Infinity
+    
+    const ray = this.raycaster.ray
+    const tempVec = new THREE.Vector3()
+    const planeNormal = new THREE.Vector3(0, 0, 1)
+    
+    for (let i = 0; i < this.meshCount; i++) {
+      // Get initial position
+      const initX = initialPositions.getX(i)
+      const initY = initialPositions.getY(i)
+      const initZ = initialPositions.getZ(i)
+      const meshSpeed = meshSpeeds.getX(i)
+      
+      // Compute displacement (matching shader logic)
+      const maxYoffset = Math.abs(initY - maxY)
+      const minYoffset = Math.abs(initY - (-maxY))
+      const maxXoffset = Math.abs(initX - maxX)
+      const minXoffset = Math.abs(initX - (-maxX))
+      
+      // mod function that matches GLSL
+      const mod = (a: number, b: number) => ((a % b) + b) % b
+      
+      const xDisplacement = mod(minXoffset - dragX + time * meshSpeed, maxXoffset + minXoffset) - minXoffset
+      const yDisplacement = mod(minYoffset - dragY, maxYoffset + minYoffset) - minYoffset
+      
+      const maxZoffset = Math.abs(initZ - maxZ)
+      const minZoffset = Math.abs(initZ - minZ)
+      const zDisplacement = mod(scrollY + minZoffset, maxZoffset + minZoffset) - minZoffset
+      
+      // Final position
+      const posX = initX + xDisplacement
+      const posY = initY + yDisplacement
+      const posZ = initZ + zDisplacement
+      
+      // Only consider planes in front of camera (z < camera.position.z)
+      if (posZ >= (this.camera as THREE.PerspectiveCamera).position.z) continue
+      
+      // Ray-plane intersection
+      // Plane equation: point on plane is (posX, posY, posZ), normal is (0, 0, 1)
+      const denom = ray.direction.dot(planeNormal)
+      if (Math.abs(denom) < 0.0001) continue // Ray parallel to plane
+      
+      tempVec.set(posX, posY, posZ).sub(ray.origin)
+      const t = tempVec.dot(planeNormal) / denom
+      
+      if (t < 0) continue // Behind ray origin
+      
+      // Get intersection point
+      const hitX = ray.origin.x + ray.direction.x * t
+      const hitY = ray.origin.y + ray.direction.y * t
+      
+      // Check if hit is within plane bounds
+      if (Math.abs(hitX - posX) <= planeHalfWidth && Math.abs(hitY - posY) <= planeHalfHeight) {
+        if (t < closestDistance) {
+          closestDistance = t
+          closestInstance = i
+        }
+      }
+    }
+    
+    if (closestInstance >= 0) {
+      // Get the album index (each album repeats in the instanced mesh)
+      const albumIndex = closestInstance % this.imageInfos.length
+      
+      // Play or pause the track
+      this.spotifyPlayer.playTrack(albumIndex)
+      
+      // Update active album for glow effect
+      this.activeAlbumIndex = albumIndex
+      this.material.uniforms.uActiveAlbum.value = albumIndex
+    }
+  }
+
   bindDrag(element: HTMLElement) {
     this.dragElement = element
 
@@ -314,12 +477,23 @@ export default class Planes {
       } catch {}
     }
 
+    const onClick = (e: MouseEvent) => {
+      // Only trigger click if there was minimal movement
+      const dx = Math.abs(e.clientX - this.drag.startX)
+      const dy = Math.abs(e.clientY - this.drag.startY)
+      
+      if (dx < 5 && dy < 5) {
+        this.onClick(e)
+      }
+    }
+
     element.addEventListener("pointerdown", onPointerDown)
     window.addEventListener("pointermove", onPointerMove)
     window.addEventListener("pointerup", onPointerUp)
+    element.addEventListener("click", onClick)
   }
 
-  onWheel(event: MouseEvent) {
+  onWheel(event: WheelEvent) {
     const normalizedWheel = normalizeWheel(event)
 
     let scrollY =
@@ -328,6 +502,23 @@ export default class Planes {
     this.scrollY.target += scrollY
 
     this.material.uniforms.uSpeedY.value += scrollY
+    
+    // Zoom toward mouse position
+    // Get mouse position in normalized coordinates (-1 to 1)
+    const mouseNormX = (event.clientX / window.innerWidth) * 2 - 1
+    const mouseNormY = -((event.clientY / window.innerHeight) * 2 - 1)
+    
+    // Convert to world space offset from center
+    const mouseWorldX = mouseNormX * (this.sizes.width / 2)
+    const mouseWorldY = mouseNormY * (this.sizes.height / 2)
+    
+    // When zooming in (positive scrollY), shift toward mouse position
+    // When zooming out (negative scrollY), shift away from mouse position
+    // The factor controls how strongly the zoom follows the mouse
+    const zoomFactor = 0.15
+    
+    this.drag.xTarget += mouseWorldX * scrollY * zoomFactor
+    this.drag.yTarget += -mouseWorldY * scrollY * zoomFactor
   }
 
   render(delta: number) {
@@ -353,6 +544,13 @@ export default class Planes {
     this.material.uniforms.uScrollY.value = this.scrollY.current
 
     this.material.uniforms.uSpeedY.value *= 0.835
+
+    // Update glow intensity for pulsing effect
+    if (this.activeAlbumIndex >= 0) {
+      const pulseSpeed = 3.0
+      const glowIntensity = 0.3 + 0.2 * Math.sin(this.material.uniforms.uTime.value * pulseSpeed)
+      this.material.uniforms.uGlowIntensity.value = glowIntensity
+    }
   }
 }
 

@@ -15,6 +15,7 @@ uniform float uScrollY;
 
 varying float vVisibility;
 varying vec4 vTextureCoords;
+varying float vInstanceId;
 
 
 //linear smoothstep
@@ -71,4 +72,5 @@ void main()
 
     vUv = uv;
     vTextureCoords = aTextureCoords;
+    vInstanceId = float(gl_InstanceID);
 }

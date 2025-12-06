@@ -65,7 +65,11 @@ export default class Canvas {
   }
 
   createPlanes() {
-    this.planes = new Planes({ scene: this.scene, sizes: this.sizes })
+    this.planes = new Planes({ 
+      scene: this.scene, 
+      sizes: this.sizes,
+      camera: this.camera 
+    })
     // Bind drag interactions to the renderer's canvas
     this.planes.bindDrag(this.renderer.domElement)
   }
